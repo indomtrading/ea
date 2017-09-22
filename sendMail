@@ -1,0 +1,866 @@
+//+------------------------------------------------------------------+
+//|                      Inverted Hammer Training Expert Advisor.mq4 |
+//|                        Copyright 2015, MetaQuotes Software Corp. |
+//|                                              http://www.mql4.com |
+//+------------------------------------------------------------------+
+//|                             Copyright (C) 1999-2016, CODEWISE CC |
+//|                                              anton.nel@gmail.com |
+//|                         Skype instant messenger: antonyannicknel |
+//|                           https://login.mql5.com/en/users/ROMAN5 |
+//| v8.11 - 9 May 2016 (Job #208954)                                 |
+//|       - Fixed BreakEven                                          |
+//|                                                                  |
+//| v8.12 - 30 May 2016                                              |
+//|       - Fixed and updated notification
+//| 
+//| v8.13 - 16 June 2015  
+//|       - Removed brackets from if(OrderMagicNumber()==Period()) 
+//|
+//| v8.14 - 19 June 2016
+//|       - Removed Spread Charge Notify from TNE email for pos close.
+//|       - Added "£" to the P/L notification on TNE template.
+//|       - Added string Symbol() to TNE Notifications.
+//|
+//| v8.15 - 22 June 2016
+//|       - Removed SendMail command from OrderMod code
+//|
+//| v8.16 - 26 Sep 2016
+//|       - Added Send Notification command for manual closing.
+//|       - Added Send Notification command in the event of failed closing of trading positons.
+//|       - Added line of information in the email body.
+//|
+//| v8.17 - 10 Oct 2016
+//|       - Added code to enable Candlebody 1 to be in proportion to Candlebody 2.
+//|
+//| v8.18 - 04 April 2017
+//|       - Dealing Desk contact details added
+//|       - StolLoss mechanism inserted.
+//+------------------------------------------------------------------+
+#property strict
+#property version "8.18"
+#define __STRATEGY_MAGIC 1001000000
+#define __SLEEP_AFTER_EXECUTION_FAIL 400
+//Exrern Variables//
+int    PCM                             =     20;
+int    HighLow1                        =     3;
+double OoTMax                          =     0.20;
+int    RewardFactor                    =     3;
+double RiskAmountPcnt                  =     10;
+extern double LotSize                  =     8;
+
+
+//+------------------------------------------------------------------+
+//| Internal variables                              
+//+------------------------------------------------------------------+
+enum ENUM_FUNCTION_MODE { MODE_DEINIT = -1, MODE_INIT, MODE_WORK };
+struct STRUCT_ORDER_INFO
+   {
+   int ticket;
+   int magic;
+   int type;
+   double lot;
+   double open;
+   double close;
+   double sl;
+   double tp;
+   double profit;
+   datetime time;
+   };
+STRUCT_ORDER_INFO stcOrdOldArr[1], stcOrdNewArr[1];   //arrays containing order list with information
+string sOrdOldArr[], sOrdNewArr[];
+
+datetime lastStamp;
+
+double            broker_ratio                  = 0;        // Broker Ratio
+double            broker_lot_min                = 0;        // Broker Minimum permitted amount of a lot.
+double            broker_lot_max                = 0;        // Broker Maximum permitted amount of a lot.
+double            broker_lot_step               = 0;        // Broker Step for changing lots.
+double            broker_contract               = 0;        // Broker Lot size in the base currency.
+double            broker_stop_level             = 0;        // Broker Stop level in points
+double            broker_freeze_level           = 0;        // Order freeze level in points. If the execution price lies within the range defined by the freeze level, the order cannot be modified, cancelled or closed.
+double            broker_point                  = 0;        // Broker Point size in the quote currency.
+
+//GlobalVariables//
+double   Short_Bull_3_Open;
+double   Short_Bull_3_Close;
+double   Short_Bull_2_Open;
+double   Short_Bull_2_Close;
+double   Short_Bear_1_Open;
+double   Short_Bear_1_Close;
+double   Short_Bear_1_Low;
+double   Short_Bull_2_Low;
+double   Long_Bear_3_Open;
+double   Long_Bear_3_Close;
+double   Long_Bear_2_Open;
+double   Long_Bear_2_Close;
+double   Long_Bull_1_Open;
+double   Long_Bull_1_Close;
+double   Long_Bear_2_High;
+double   Long_Bull_1_High;
+double   CandleBody_3;
+double   CandleBody_2;
+double   CandleBody_1;
+double   CandleBody_3B;
+double   CandleBody_2B;
+double   CandleBody_1B;
+double   CandleBody_2_Low;
+double   CandleBody_1_Low;
+double   CandleBody_1_High;
+double   CandleBody_2_High;
+bool     IsTime;
+bool     NewBar;
+bool     ClosePosition;
+bool     BuyMod;
+bool     SellMod;
+datetime DateTimeNow;
+datetime DateTimeVariable = D'1970.01.01 00:00:00';
+double   tickvalue;              
+double   spread;                  
+int      TradeDuration;
+int      maPeriod;           
+/*int      LotSize;*/
+color    buycolor;                
+color    sellcolor;
+double   pips;
+double   breakeven; 
+int      thisAccountNumber;
+string   eaName;
+double   currentBid;
+double   currentAsk;
+double   currentSpread;
+double   entryPriceBid;
+double   entryPriceAsk;
+double   accountBalance;
+double   amountAtRisk;
+            
+/*---------------------------------------------------------------------------*/
+int OnInit()
+{
+// bool OpenLong = OrderSend(Symbol(),OP_SELL,LotSize,MarketInfo(Symbol(),MODE_BID),300,0,0,"Spread Charge £"+DoubleToStr((spread*tickvalue)*LotSize,2),Period(),0,sellcolor);
+//  bool OpenShort = OrderSend(Symbol(),OP_BUY,LotSize,MarketInfo(Symbol(),MODE_ASK),300,0,0,"Spread Charge £"+DoubleToStr((spread*tickvalue)*LotSize,2),Period(),0,sellcolor);
+   
+   lastStamp = 0;
+   GetMarketInfo_PerSymbol(Symbol(), true);
+   fEvents(MODE_INIT); 
+   
+   return(INIT_SUCCEEDED);
+}
+void OnTick()
+{
+//---
+//Local Declaration
+Short_Bull_3_Open    =  iOpen(Symbol(),0,3);
+Short_Bull_3_Close   =  iClose(Symbol(),0,3); 
+Short_Bull_2_Open    =  iOpen(Symbol(),0,2);
+Short_Bull_2_Close   =  iClose(Symbol(),0,2);
+Short_Bear_1_Open    =  iOpen(Symbol(),0,1);
+Short_Bear_1_Close   =  iClose(Symbol(),0,1);
+Short_Bear_1_Low     =  iLow(Symbol(),0,1);
+Short_Bull_2_Low     =  iLow(Symbol(),0,2);
+Long_Bear_2_High     =  iHigh(Symbol(),0,2);
+Long_Bull_1_High     =  iHigh(Symbol(),0,1);
+Long_Bear_3_Open     =  iOpen(Symbol(),0,3);
+Long_Bear_3_Close    =  iClose(Symbol(),0,3);
+Long_Bear_2_Open     =  iOpen(Symbol(),0,2);
+Long_Bear_2_Close    =  iClose(Symbol(),0,2);
+Long_Bull_1_Open     =  iOpen(Symbol(),0,1);
+Long_Bull_1_Close    =  iClose(Symbol(),0,1);
+CandleBody_3         =  (Short_Bull_3_Close - Short_Bull_3_Open);
+CandleBody_2         =  (Short_Bull_2_Close - Short_Bull_2_Open);
+CandleBody_1         =  (Short_Bear_1_Open - Short_Bear_1_Close);
+CandleBody_3B        =  (Long_Bear_3_Open - Long_Bear_3_Close);
+CandleBody_2B        =  (Long_Bear_2_Open - Long_Bear_2_Close);
+CandleBody_1B        =  (Long_Bull_1_Close - Long_Bull_1_Open);
+CandleBody_2_Low     =  (Short_Bull_2_Close - Short_Bull_2_Low);
+CandleBody_1_Low     =  (Short_Bear_1_Open - Short_Bear_1_Low);
+CandleBody_1_High    =  (Long_Bull_1_High - Long_Bull_1_Open);   
+CandleBody_2_High    =  (Long_Bear_2_High - Long_Bear_2_Close);
+IsTime               =  (IsTime(7,19,59,59));
+NewBar               =  (NewBar(Symbol(),PERIOD_CURRENT));
+ClosePosition        =  true;
+BuyMod               =  true;
+SellMod              =  true;
+tickvalue            =  MarketInfo(Symbol(),MODE_TICKVALUE);
+spread               =  MarketInfo(Symbol(),MODE_SPREAD);
+TradeDuration        =  Period();
+buycolor             =  clrGreen;
+sellcolor            =  clrRed;
+breakeven            =  50;
+maPeriod             =  20;
+thisAccountNumber    =  AccountNumber();
+eaName               =  WindowExpertName();
+currentBid           =  MarketInfo(Symbol(),MODE_BID);
+currentAsk           =  MarketInfo(Symbol(),MODE_ASK);
+currentSpread        =  MarketInfo(Symbol(),MODE_SPREAD);
+entryPriceBid        =  MarketInfo(Symbol(),MODE_BID);
+entryPriceAsk        =  MarketInfo(Symbol(),MODE_ASK);
+accountBalance       =  AccountBalance();
+amountAtRisk         =  RiskAmountPcnt/100;
+//-------------------------------------------------------------------------------------------------//
+if(CandleBody_1 >= Transform(PCM,2))
+if(CandleBody_2 >= Transform(PCM,2))
+if((CandleBody_1_Low/CandleBody_1) >= HighLow1)
+if((CandleBody_1/CandleBody_2)<= OoTMax)
+if(iClose(NULL,0,1)< iMA(NULL,0,maPeriod,0,MODE_SMA,PRICE_CLOSE,1))
+//if(IsTime)
+if(NewBar)
+   {
+   bool OpenShort = OrderSend(Symbol(),OP_SELL,LotSize,MarketInfo(Symbol(),MODE_BID),300,((entryPriceBid/Point)+((accountBalance * amountAtRisk)/(tickvalue * LotSize)))*Point,((entryPriceBid/Point)-(((accountBalance * amountAtRisk)/(tickvalue * LotSize)) * RewardFactor)) * Point,"Spread Charge £"+DoubleToStr((spread * tickvalue)*LotSize,2),Period(),0,sellcolor);
+   if(OpenShort == false) 
+      {
+      Sleep(__SLEEP_AFTER_EXECUTION_FAIL);
+      SendMail("Trade Execution Failure for Error #"+IntegerToString(GetLastError(),5),"An attempt to execute a trading position has failed. Please refer to error code #"+IntegerToString(GetLastError(),5));
+      }
+      else if(OpenShort == true)
+         {
+         int PosSel = OrdersTotal()-1;
+         bool res = OrderSelect(PosSel,SELECT_BY_POS,MODE_TRADES);
+            if(res == true && Digits == 5)
+               {
+               //double ClosingPrice = OrderClosePrice();
+               //double Profit       = OrderProfit();
+               //string Comment      = OrderComment(); 
+               double OpeningPrice   = OrderOpenPrice();
+               double Ticket         = OrderTicket();
+               string symbol         = OrderSymbol();
+               double StopLoss       = OrderStopLoss();
+               Sleep (5000);
+               SendMail("Trade Notification Email (TNE)","Order #"+DoubleToStr(Ticket,0)+" has been placed on the account "+AccountName()+
+               "\n"+
+               "\nThe order entry price for this trade is "+DoubleToStr(OpeningPrice,5)+" for the symbol "+(symbol)+
+               "\n"+
+               "\nThe spread charge for this position is £"+DoubleToStr((spread*tickvalue)*LotSize,2)+" with a margin of £"+DoubleToStr(AccountMargin(),0)+
+               "\n"+
+               "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+               "\n"+
+               "\nThe estimated StopLoss Cost for this trade will be £"+DoubleToStr((((StopLoss - OpeningPrice)/Point)* tickvalue * LotSize),2)+
+               "\n"+
+               "This is an Automated Message from Blue City Asset Management Limited"+
+               "\n-----------------------------------------------------------------------"+
+               "\nTo contact FXPro Dealing Desk"+
+               "\n"+
+               "\nCall (0)203 151 5555"+
+               "\n"+
+               "\nAccount number "+IntegerToString(thisAccountNumber,7)+ 
+               "\n"+
+               "\nThe ticket confirmation number is #"+DoubleToStr(Ticket, 0)+
+               "\n"+
+               "\nThe name of the Expert Adviser is "+(eaName)+
+               "\n-----------------------------------------------------------------------"+
+               "\n"+
+               "\nPRIVACY NOTICE"+
+               "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+               "\n"+
+               "\nInDom Trading Asset Management (Europe) Limited"+
+               "\nHanover Walk"+
+               "\nLondon"+
+               "\nEC3 3UR"+
+               "\nRegistered Company Number 07704540.Registered in England and Wales");
+               printf("PCL1 [%d] PrevHigh/Low [%1.1f] OoT [%1.1f]",(int)NormalizeDouble(CandleBody_1/Point,0),(CandleBody_1_High/CandleBody_1),(CandleBody_1/CandleBody_2));//SELL
+               }
+                 else if (res == true && Digits == 3)
+                    {
+                    //double ClosingPrice = OrderClosePrice();
+                    //double Profit       = OrderProfit();
+                    //string Comment      = OrderComment();
+                    double OpeningPrice   = OrderOpenPrice();
+                    double Ticket         = OrderTicket();
+                    string symbol         = OrderSymbol();
+                    int lastError         = GetLastError();
+                    double StopLoss       = OrderStopLoss();
+                    SendMail("Trade Notification Email (TNE)","Order #"+DoubleToStr(Ticket,0)+" has been placed on the account "+AccountName()+
+                    "\n"+
+                    "\nThe order entry price for this trade is "+DoubleToStr(OpeningPrice,3)+" for the symbol "+(symbol)+
+                    "\n"+
+                    "\nThe spread charge for this position is £"+DoubleToStr((spread*tickvalue)*LotSize,2)+" with a margin of £"+DoubleToStr(AccountMargin(),0)+
+                    "\n"+
+                    "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+                    "\n"+
+                    "\nThe estimated StopLoss Cost for this trade will be £"+DoubleToStr((((StopLoss - OpeningPrice)/Point)* tickvalue * LotSize),2)+
+                    "\n"+
+                    "This is an Automated Message from Blue City Asset Management Limited"+
+                    "\n-----------------------------------------------------------------------"+
+                    "\nTo contact FXPro Dealing Desk"+
+                    "\n"+
+                    "\nCall (0)203 151 5555"+
+                    "\n"+
+                    "\nAccount number "+IntegerToString(thisAccountNumber,7)+ 
+                    "\n"+
+                    "\nThe ticket confirmation number is #"+DoubleToStr(Ticket, 0)+
+                    "\n"+
+                    "\nThe name of the Expert Adviser is "+(eaName)+
+                    "\n-----------------------------------------------------------------------"+
+                    "\n"+
+                    "\nPRIVACY NOTICE"+
+                    "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                    "\n"+
+                    "\nInDom Trading Asset Management (Europe) Limited"+
+                    "\nHanover Walk"+
+                    "\nLondon"+
+                    "\nEC3 3UR"+
+                    "\nRegistered Company Number 07704540.Registered in England and Wales");
+                    printf("PCL1 [%d] PrevHigh/Low [%1.1f] OoT [%1.1f]",(int)NormalizeDouble(CandleBody_1/Point,0),(CandleBody_1_High/CandleBody_1),(CandleBody_1/CandleBody_2));
+                     }
+                       else if (res == false && NewBar)
+                       {
+                       SendMail("Order Selection Error Message","An order may have been placed or closed on your account "+AccountName()+AccountServer()+
+                       "\n"+
+                       "\nHowever, there has been an error in selecting the trade from the ledger. Therefore, it has not been possible to give a TNE"+
+                       "\n"+
+                       "\nPlease contact your system administrator at eadeveloper@indomtrading.com & forward this message, quoting Error #"+IntegerToString(GetLastError(),4)+
+                       "\n-----------------------------------------------------------------------"+
+                       "\n"+
+                       "\nPRIVACY NOTICE"+
+                       "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                       "\n"+
+                       "\nInDom Trading Asset Management (Europe) Limited"+
+                       "\nHanover Walk"+
+                       "\nLondon"+
+                       "\nEC3 3UR"+
+                       "\nRegistered Company Number 07704540. Registered in England and Wales");
+                       }
+                      }
+                   }
+if(CandleBody_1B >= Transform(PCM,2))
+if(CandleBody_2B >= Transform(PCM,2))
+if((CandleBody_1_High/CandleBody_1B)>= HighLow1)
+if((CandleBody_1B/CandleBody_2B)<=OoTMax)
+//if(iClose(NULL,0,1)> iMA(Symbol(),NULL,maPeriod,0,MODE_SMA,PRICE_CLOSE,1))
+//if(IsTime)
+if(NewBar)
+   {
+   bool OpenLong = OrderSend(Symbol(),OP_BUY,LotSize,MarketInfo(Symbol(),MODE_ASK),300,((entryPriceAsk/Point)-((accountBalance * amountAtRisk)/(tickvalue * LotSize)))*Point,((entryPriceAsk/Point)+(((accountBalance * amountAtRisk)/(tickvalue * LotSize)) * RewardFactor))* Point,"Spread Charge £"+DoubleToStr((spread*tickvalue)*LotSize,2),Period(),0,buycolor);
+   if(OpenLong == false)
+      {
+      Sleep(__SLEEP_AFTER_EXECUTION_FAIL);
+      SendMail("Trade Execution Failure for Error #"+IntegerToString(GetLastError(),5),"An attempt to execute a trading position has failed. Please refer to error code #"+IntegerToString(GetLastError(),5));
+      }
+      else if(OpenLong == true)
+         {
+         int PosSel = OrdersTotal()-1;
+         bool res = OrderSelect(PosSel,SELECT_BY_POS,MODE_TRADES);
+         if(res == true && Digits == 5)
+            {
+               //double ClosingPrice = OrderClosePrice();
+               //double Profit       = OrderProfit();
+               //string Comment      = OrderComment(); 
+               double OpeningPrice   = OrderOpenPrice();
+               double Ticket         = OrderTicket();
+               string symbol         = OrderSymbol();
+               int lastError         = GetLastError();
+               double StopLoss       = OrderStopLoss();
+               Sleep (5000);
+               SendMail("Trade Notification Email (TNE)","Order #"+DoubleToStr(Ticket,0)+" has been placed on the account "+AccountName()+
+               "\n"+
+               "\nThe order entry price for this trade is "+DoubleToStr(OpeningPrice,5)+" for the symbol "+(symbol)+
+               "\n"+
+               "\nThe spread charge for this position is £"+DoubleToStr((spread*tickvalue)*LotSize,2)+" with a margin of £"+DoubleToStr(AccountMargin(),0)+
+               "\n"+
+               "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+               "\n"+
+               "\nThe estimated StopLoss Cost for this trade will be £"+DoubleToStr((((OpeningPrice - StopLoss)/Point)* tickvalue * LotSize),2)+
+               "\n"+
+               "This is an Automated Message from Blue City Asset Management Limited"+
+               "\n-----------------------------------------------------------------------"+
+               "\nTo contact FXPro Dealing Desk"+
+               "\n"+
+               "\nCall (0)203 151 5555"+
+               "\n"+
+               "\nAccount number "+IntegerToString(thisAccountNumber,7)+ 
+               "\n"+
+               "\nThe ticket confirmation number is #"+DoubleToStr(Ticket, 0)+
+               "\n"+
+               "\nThe name of the Expert Adviser is "+(eaName)+
+               "\n-----------------------------------------------------------------------"+
+               "\n"+
+               "\nPRIVACY NOTICE"+
+               "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+               "\n"+
+               "\nInDom Trading Asset Management (Europe) Limited"+
+               "\nHanover Walk"+
+               "\nLondon"+
+               "\nEC3 3UR"+
+               "\nRegistered Company Number 07704540.Registered in England and Wales");
+               printf("PCL [%d] PrevHigh/Low [%1.1f] OoT [%1.1f]",(int)NormalizeDouble(CandleBody_1B/Point,0),(CandleBody_1_High/CandleBody_1B),(CandleBody_1B/CandleBody_2B));//BUY
+               }
+                 else if (res == true && Digits == 3)
+                    {
+                    //double ClosingPrice = OrderClosePrice();
+                    //double Profit       = OrderProfit();
+                    //string Comment      = OrderComment();
+                    double OpeningPrice   = OrderOpenPrice();
+                    double Ticket         = OrderTicket();
+                    string symbol         = OrderSymbol();
+                    int lastError         = GetLastError();
+                    double StopLoss       = OrderStopLoss();
+                    SendMail("Trade Notification Email (TNE)","Order #"+DoubleToStr(Ticket,0)+" has been placed on the account "+AccountName()+
+                    "\n"+
+                    "\nThe order entry price for this trade is "+DoubleToStr(OpeningPrice,3)+" for the symbol "+(symbol)+
+                    "\n"+
+                    "\nThe spread charge for this position is £"+DoubleToStr((spread*tickvalue)*LotSize,2)+" with a margin of £"+DoubleToStr(AccountMargin(),0)+
+                    "\n"+
+                    "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+                    "\n"+
+                    "\nThe estimated StopLoss Cost for this trade will be £"+DoubleToStr((((OpeningPrice - StopLoss)/Point)* tickvalue * LotSize),2)+
+                    "\n"+
+                    "This is an Automated Message from Blue City Asset Management Limited"+
+                    "\n-----------------------------------------------------------------------"+
+                    "\nTo contact FXPro Dealing Desk"+
+                    "\n"+
+                    "\nCall (0)203 151 5555"+
+                    "\n"+
+                    "\nAccount number "+IntegerToString(thisAccountNumber,7)+ 
+                    "\n"+
+                    "\nThe ticket confirmation number is #"+DoubleToStr(Ticket, 0)+
+                    "\n"+
+                    "\nThe name of the Expert Adviser is "+(eaName)+
+                    "\n-----------------------------------------------------------------------"+
+                    "\n"+
+                    "\nPRIVACY NOTICE"+
+                    "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                    "\n"+
+                    "\nInDom Trading Asset Management (Europe) Limited"+
+                    "\nHanover Walk"+
+                    "\nLondon"+
+                    "\nEC3 3UR"+
+                    "\nRegistered Company Number 07704540.Registered in England and Wales");
+                    printf("PCL [%d] PervHigh/Low [%1.1f] OoT [%1.1f]",(int)NormalizeDouble(CandleBody_1B/Point,0),(CandleBody_1_High/CandleBody_1B),(CandleBody_1B/CandleBody_2B));//BUY
+                    }
+                          else if (res == false && NewBar)
+                          {
+                          SendMail("Order Selection Error Message","An order may have been placed or closed on your account "+AccountName()+AccountServer()+
+                          "\n"+
+                          "\nHowever, there has been an error in selecting the trade from the ledger. Therefore, it has not been possible to give a TNE"+
+                          "\n"+
+                          "\nPlease contact your system administrator at eadeveloper@indomtrading.com & forward this message, quoting Error #"+IntegerToString(GetLastError(),4)+
+                          "\n-----------------------------------------------------------------------"+
+                          "\n"+
+                          "\nPRIVACY NOTICE"+
+                          "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                          "\n"+
+                          "\nInDom Trading Asset Management (Europe) Limited"+
+                          "\nHanover Walk"+
+                          "\nLondon"+
+                          "\nEC3 3UR"+
+                          "\nRegistered Company Number 07704540. Registered in England and Wales");
+                          }
+                      }
+                  }
+/*------------------------------------------------------------------------------------------------------------------------------------------*/
+
+             
+                  
+/*------------------------------------------------------------------------------------------------------------------------------------------*/                  
+                  //Order Close//
+                  string sym  =  Symbol();
+                  int ordersTotal = OrdersTotal();
+                  for(int PosSel = ordersTotal-1; PosSel>=0; PosSel--)
+                     {
+                     if(OrderSelect(PosSel,SELECT_BY_POS,MODE_TRADES))
+                     if(OrderTicket() > 0)
+                     if((OrderMagicNumber() == Period()))
+                     if(OrderSymbol() == Symbol())
+                     if(TimeCurrent() >=(OrderOpenTime() + 60 * Period()))
+                        {                  
+                        ClosePosition = OrderClose(OrderTicket(),LotSize,MarketInfo(sym,MODE_BID) + MarketInfo(sym,MODE_SPREAD) * MarketInfo(sym,MODE_POINT),300,clrNONE);
+                           if(ClosePosition == true)
+                           {
+                           Sleep(60000);
+                           int PosSelHist = OrdersHistoryTotal()-1;
+                           bool reshist = OrderSelect(PosSelHist,SELECT_BY_POS,MODE_HISTORY);
+                              if(reshist == true && Digits == 5)
+                              {
+                              double ClosingPrice = OrderClosePrice();
+                              double OpeningPrice = OrderOpenPrice();
+                              double Profit       = OrderProfit();
+                              int    Ticket       = OrderTicket();
+                              SendMail("Trade Notification Email Sales Receipt (TNESR)","Order #"+DoubleToStr(Ticket,0)+" has been closed on the account "+AccountName()+
+                              "\n"+
+                              "\nThe order exit price for this trade is "+DoubleToStr(ClosingPrice,5)+" with a profit/loss of £"+DoubleToStr(Profit,2)+
+                              "\n"+
+                              "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+                               "\n"+
+                              "This is an Automated Message from Blue City Asset Management Limited"+
+                              "\n-----------------------------------------------------------------------"+
+                              "\n"+
+                              "\nPRIVACY NOTICE"+
+                              "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                              "\n"+
+                              "\nInDom Trading Asset Management (Europe) Limited"+
+                              "\nHanover Walk"+
+                              "\nLondon"+
+                              "\nEC3 3UR"+
+                              "\nRegistered Company Number 07704540.Registered in England and Wales");
+                              }
+                              else if(reshist == true && Digits == 3)
+                              {
+                              double ClosingPrice = OrderClosePrice();
+                              double OpeningPrice = OrderOpenPrice();
+                              double Profit       = OrderProfit();
+                              int    Ticket       = OrderTicket();
+                              SendMail("Trade Notification Email Sales Receipt (TNESR)","Order #"+DoubleToStr(Ticket,0)+" has been closed on the account "+AccountName()+
+                              "\n"+
+                              "\nThe order entry price for this trade is "+DoubleToStr(ClosingPrice,3)+" with a profit/loss of £"+DoubleToStr(Profit,2)+
+                              "\n"+
+                              "\nYou can now receive email & terminal notifications when you close positions manually, complete with the closing price, ticket number, and your realized profit or loss"+
+                               "\n"+
+                              "This is an Automated Message from Blue City Asset Management Limited"+
+                              "\n-----------------------------------------------------------------------"+
+                              "\n"+
+                              "\nPRIVACY NOTICE"+
+                              "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+                              "\n"+
+                              "\nInDom Trading Asset Management (Europe) Limited"+
+                              "\nHanover Walk"+
+                              "\nLondon"+
+                              "\nEC3 3UR"+
+                              "\nRegistered Company Number 07704540.Registered in England and Wales");
+                              }
+                           }
+                           else if(ClosePosition == false)
+                           {
+                           int failedClosePosition = OrdersTotal()-1;
+                           bool failedPositionToCloseSelect = OrderSelect(failedClosePosition,SELECT_BY_POS,MODE_TRADES);       
+                           if(failedPositionToCloseSelect == true)
+                              {
+                              SendNotification("Order Number #"+IntegerToString(OrderTicket(),10)+" has failed to close. Please refer to error code "+IntegerToString(GetLastError()));
+                              }
+                           else if(failedPositionToCloseSelect == false) 
+                              {
+                              SendNotification("Order Number #"+IntegerToString(OrderTicket(),10)+" has failed to close and has also failed to select the order. Please close manuall7 & refer to error doce #"+IntegerToString(GetLastError()));
+                              }
+                           }
+                        }
+                     }
+                            
+/*-----------------------------------------------------------------------------------------*/
+                      ordersTotal = OrdersTotal();
+                      for(int s=ordersTotal-1;s>=0;s--)
+                        {
+                        if(OrderSelect(s,SELECT_BY_POS,MODE_TRADES)==true)
+                           {
+                           if(OrderTicket() > 0)
+                           if(OrderSymbol() == Symbol())
+                           {
+                              RefreshRates();
+                              double   ask         = Ask;
+                              double   targetAsk   = 0;
+                              double   aNewSLPrice =  NormalizeDouble(OrderOpenPrice(),Digits); 
+                              if (broker_stop_level > breakeven)
+                                 targetAsk = OrderOpenPrice() - ((broker_stop_level+1) * Point);
+                              else
+                                 targetAsk = OrderOpenPrice() - ((breakeven+broker_stop_level+1) * Point);
+                              double   aCurrentSL  =  NormalizeDouble(OrderStopLoss(),Digits); 
+                              int      aTicket     =  OrderTicket();
+                              if(OrderType() == OP_SELL)
+                              if(ask < targetAsk)
+                              if(Symbol()==OrderSymbol())
+                              if(DoubleToStr(aNewSLPrice,Digits) != DoubleToStr(aCurrentSL,Digits))
+                                 {
+                                 PrintFormat("SellMod OrderOpenPrice %7.5f Ask %7.5f aNewSLPrice %7.5f",OrderOpenPrice(),ask,aNewSLPrice);
+                                 SellMod = OrderModify(aTicket,OrderOpenPrice(),aNewSLPrice,OrderTakeProfit(),0,sellcolor);
+                                 if(!SellMod)
+                                    {
+                                    PrintFormat("Order modification for ticket %10d has failed to modify the order under the Error Code# %5d. Check MQL4 Documentation",aTicket,GetLastError());
+                                    }
+                                    else
+                                    {
+                                       int delaySeconds = 60;
+                                       if (TimeCurrent() >= lastStamp + delaySeconds)
+                                       {
+                                          SendNotification("Ticket# "+IntegerToString(aTicket,10)+" has been modified to breakeven");
+                                          lastStamp = TimeCurrent();
+                                       }
+                                    }
+                                 }
+                              }
+                            }
+                          }
+                      ordersTotal = OrdersTotal();   
+                      for(int b=ordersTotal-1;b>=0;b--)
+                        {
+                        if(OrderSelect(b,SELECT_BY_POS,MODE_TRADES)==true)
+                           {
+                           if(OrderTicket() > 0)
+                           if(OrderSymbol() == Symbol())
+                           {
+                              RefreshRates();
+                              double   bid         = Bid;
+                              double   targetBid   = 0;
+                              double   aNewSLPrice =  NormalizeDouble(OrderOpenPrice(),Digits); 
+                              if (broker_stop_level > breakeven)
+                                 targetBid = OrderOpenPrice() + ((broker_stop_level+1) * Point);
+                              else
+                                 targetBid = OrderOpenPrice() + ((breakeven+broker_stop_level+1) * Point);
+                              double   aCurrentSL  =  NormalizeDouble(OrderStopLoss(),Digits); 
+                              int      aTicket     =  OrderTicket();
+                              if(OrderType() == OP_BUY)
+                              if(bid > targetBid)
+                              if(Symbol()==OrderSymbol())
+                              if(DoubleToStr(aNewSLPrice,Digits) != DoubleToStr(aCurrentSL,Digits))
+                                 {
+                                 PrintFormat("BuyMod OrderOpenPrice %7.5f Bid %7.5f aNewSLPrice %7.5f",OrderOpenPrice(),bid,aNewSLPrice);   
+                                 BuyMod = OrderModify(aTicket,OrderOpenPrice(),aNewSLPrice,OrderTakeProfit(),0,buycolor);
+                                 if(!BuyMod)
+                                    {
+                                       PrintFormat("Order modification for ticket %10d has failed to modify the order under the Error Code# %5d. Check MQL4 Documentation",aTicket,GetLastError());
+                                    }
+                                    else
+                                    {
+                                       int delaySeconds = 60;
+                                       if (TimeCurrent() >= lastStamp + delaySeconds)
+                                       {
+                                          SendNotification("Ticket# "+IntegerToString(aTicket,10)+" has been modified to breakeven");
+                                          lastStamp = TimeCurrent();
+                                       }
+                                    }
+                                 }
+                              }
+                            }
+                          }
+                          fEvents(MODE_WORK);
+ } 
+
+/*-----------------------------------------------------------------------------------------*/                       
+
+double Transform (double Value, int Transformation)
+{
+   static double pipSize = 0;   
+   if(pipSize == 0) pipSize = Point * (1 + 9 * (Digits == 3 || Digits == 5));
+
+   switch(Transformation)
+   { 
+      case 0: return(Value/Point);
+      case 1: return(Value/pipSize);
+      case 2: return(Value*Point);
+      case 3: return(Value*pipSize);  
+      default: return(0);    
+   }
+}
+
+bool IsTime (int startHour, int endHour, int startMinute, int endMinute)
+{
+   if (startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23 ||
+       startMinute < 0 || startMinute > 59 || endMinute < 0 || endMinute > 59)
+       return false;
+   
+   int startTime = startHour*60 + startMinute;
+   int endTime = endHour*60 + endMinute;
+   int time = Hour()*60 + Minute();
+   
+   if (startTime < endTime)
+      return (time >= startTime && time <= endTime);
+   else if (startTime > endTime)
+      return (time >= startTime || time <= endTime);
+   else
+      return (time == startTime);
+}
+bool NewBar(string SYMBOL,ENUM_TIMEFRAMES TIMEFRAME) 
+{
+datetime time[1];
+static datetime lastbartime = 0;
+if(CopyTime(SYMBOL,TIMEFRAME,0,1,time)<1)
+return(false);
+if(time[0]!=lastbartime)
+{
+lastbartime = time[0];
+return(true);
+}
+return(false);
+}
+
+void GetMarketInfo_PerSymbol(string symbol, bool showPrint)
+{
+	double digits = MarketInfo(symbol, MODE_DIGITS);
+	
+	// Broker Ratio
+	broker_ratio = 1;
+	// Adjust for five (5) digit brokers.
+	if (digits == 5 || digits == 3)
+	{   
+	   broker_ratio = 10;
+	} 
+	if (showPrint) Print("Broker Ratio: " + DoubleToStr(broker_ratio,0));
+
+	// Broker Minimum permitted amount of a lot.
+	broker_lot_min  = MarketInfo(symbol,MODE_MINLOT);
+	if (showPrint) Print("Broker Minimum permitted amount of a lot: " + DoubleToStr(broker_lot_min,2));
+
+	// Maximum permitted amount of a lot.
+	broker_lot_max  = MarketInfo(symbol,MODE_MAXLOT);
+	if (showPrint) Print("Broker Maximum permitted amount of a lot: " + DoubleToStr(broker_lot_max,2));
+
+	// Step for changing lots.
+	broker_lot_step = MarketInfo(symbol,MODE_LOTSTEP);
+	if (showPrint) Print("Broker Step for changing lots: " + DoubleToStr(broker_lot_step,5));
+
+	// Lot size in the base currency.
+	broker_contract = MarketInfo(symbol,MODE_LOTSIZE);
+	if (showPrint) Print("Broker Lot size in the base currency: " + DoubleToStr(broker_contract,5));
+
+	// Stop level in points.
+	broker_stop_level = MarketInfo(symbol,MODE_STOPLEVEL);
+	if (showPrint) Print("Broker Stop Level: " + DoubleToStr(broker_stop_level,5));
+
+	// Order freeze level in points. If the execution price lies within the range defined by the freeze level, the order cannot be modified, cancelled or closed.
+	broker_freeze_level = MarketInfo(symbol,MODE_FREEZELEVEL);
+	if (showPrint) Print("Broker Freeze Level: " + DoubleToStr(broker_freeze_level,5));
+
+	//Point size in the quote currency. For the current symbol, it is stored in the predefined variable Point.
+	broker_point = MarketInfo(symbol,MODE_POINT)*broker_ratio;
+	if (showPrint) Print("Broker Point: " + DoubleToStr(broker_point,Digits));
+}
+//+------------------------------------------------------------------+
+//| forexmts, forexmts@mail.ru, v4.0vs-                              |
+//| Order accounting function,                                       |
+//| current state is stored in dOrdNewArr array                      |
+//| previous state is stored in dOrdOldArr array                     |
+//+------------------------------------------------------------------+
+void fOrders()
+  {
+  int iQuant = 0;                          //orders counter initialization
+
+  ArrayResize(stcOrdOldArr, ArraySize(stcOrdNewArr));   //resize old array according to new array size   
+  ArrayCopy(stcOrdOldArr, stcOrdNewArr);                //save new array to old array
+  ArrayResize(stcOrdNewArr, 0);
+  ArrayResize(sOrdOldArr, ArraySize(sOrdNewArr));       //resize old array according to new array size   
+  ArrayCopy(sOrdOldArr, sOrdNewArr);                    //save new array to old array
+  ArrayResize(sOrdNewArr, 0);
+  
+  for(int i = 0; i < OrdersTotal(); i++)
+    {
+    if(OrderSelect(i, SELECT_BY_POS) && OrderSymbol() == _Symbol && OrderMagicNumber() == Period())
+      {
+      if (ArraySize(stcOrdNewArr) <= iQuant)        //add index to array if necessary
+        {
+        ArrayResize(stcOrdNewArr, iQuant+1, 10);
+        ArrayResize(sOrdNewArr, iQuant+1, 10);
+        }
+       
+      stcOrdNewArr[iQuant].ticket = OrderTicket();          //order ticket
+      stcOrdNewArr[iQuant].magic = OrderMagicNumber();     //order magic number
+      stcOrdNewArr[iQuant].type = OrderType();            //order type
+      stcOrdNewArr[iQuant].lot = OrderLots();            //order volume
+      stcOrdNewArr[iQuant].open = OrderOpenPrice();       //order open price
+      stcOrdNewArr[iQuant].close = OrderClosePrice();
+      stcOrdNewArr[iQuant].profit = OrderProfit()+OrderSwap()+OrderCommission();
+      stcOrdNewArr[iQuant].time = OrderOpenTime();
+      stcOrdNewArr[iQuant].sl = OrderStopLoss();
+      stcOrdNewArr[iQuant].tp = OrderTakeProfit();
+      sOrdNewArr[iQuant] = OrderComment();           //order comment
+      
+      iQuant++;                                       //order index
+      }
+    }  //for
+  return;
+  }
+//+------------------------------------------------------------------+
+//| forexmts, forexmts@mail.ru, v4.0vs-                              |
+//| Events function,                                                 |
+//| detects changes in orders list                                   |
+//+------------------------------------------------------------------+
+void fEvents(ENUM_FUNCTION_MODE enMode)
+   {   
+   if (enMode == MODE_INIT) { fOrders(); return; }
+   
+   if (enMode == MODE_WORK)
+   {
+   bool bFoundFlag;
+   fOrders();
+   //existing orders check
+   for(int i = 0; i < ArraySize(stcOrdOldArr); i++)  //search all orders from the old array
+      {
+      bFoundFlag = false;
+      for(int j = 0; j < ArraySize(stcOrdNewArr); j++) //.. in the new array
+         {         
+         if (stcOrdOldArr[i].ticket == stcOrdNewArr[j].ticket) //found by ticket 
+            {
+            if (stcOrdOldArr[i].type != stcOrdNewArr[j].type) { }//but the type has changed
+            if (stcOrdOldArr[i].sl != stcOrdNewArr[j].sl) { } //SL was changed
+            if (stcOrdOldArr[i].tp != stcOrdNewArr[j].tp) { } //TP was changed
+               
+            bFoundFlag = true;
+            break;                              //stop searching in the new array
+            }
+         }
+
+      if (bFoundFlag == false)                 //order wasn't found
+         {
+         if (stcOrdOldArr[i].type <= 1)
+            //we can't use profit and close price, lots and commentary (for partial close) from the dOrdOldArr, because we need their after close values
+            if (OrderSelect(stcOrdOldArr[i].ticket, SELECT_BY_TICKET))
+               {
+               string sKindOfExit = "";
+               if ((OrderType() == OP_BUY && OrderClosePrice() <= stcOrdOldArr[i].sl) || (OrderType() == OP_SELL && OrderClosePrice() >= stcOrdOldArr[i].sl && stcOrdOldArr[i].sl > 0) || StringFind(OrderComment(), "[sl]") >= 0)
+                  sKindOfExit = " at StopLoss"; //close by sl
+               else
+               if ((OrderType() == OP_BUY && OrderClosePrice() >= stcOrdOldArr[i].tp && stcOrdOldArr[i].tp > 0) || (OrderType() == OP_SELL && OrderClosePrice() <= stcOrdOldArr[i].tp) || StringFind(OrderComment(), "[tp]") >= 0)
+                  sKindOfExit = " at TakeProfit"; //close be tp
+               else
+                  { }         //ordinary close
+               
+               SendMail("Sales Receipt on Position Closure","Order #"+IntegerToString(OrderTicket())+" has been closed"+sKindOfExit+" on the account "+AccountName()+" "+AccountServer()+
+               "\n"+
+               "\nThe order exit price for this trade is "+DoubleToStr(OrderClosePrice(),_Digits)+" with a "+(OrderProfit()>=0?"profit":"loss")+" of £"+DoubleToStr(OrderProfit(),2)+
+               "\n"+
+               "\nThis is an Automated Message from Blue City Asset Management Limited"+
+               "\n-----------------------------------------------------------------------"+
+               "\n"+
+               "\nPRIVACY NOTICE"+
+               "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+               "\n"+
+               "\nInDom Trading Asset Management (Europe) Limited"+
+               "\nHanover Walk"+
+               "\nLondon"+
+               "\nEC3 3UR"+
+               "\nRegistered Company Number 07704540.Registered in England and Wales");
+               SendNotification("Ticket #"+IntegerToString(OrderTicket())+" has closed with a "+(OrderProfit()>=0?"profit":"loss")+" of "+DoubleToStr(OrderProfit(),2));
+               }
+            else
+               { }   //order not found
+
+         if (stcOrdOldArr[i].type > 1) { }      //pending order is deleted
+         
+         }
+      }
+   
+   //new orders check
+   for(int j = 0; j < ArraySize(stcOrdNewArr); j++)   //search all orders from the new array
+      {
+      bFoundFlag = false;
+      for(int i = 0; i < ArraySize(stcOrdOldArr); i++)   //..in the old array
+         {
+         if (stcOrdNewArr[j].ticket == stcOrdOldArr[i].ticket) //found by ticket
+            {
+            bFoundFlag = true;
+            break;                           //stop searching in the old array
+            }
+         }
+      
+      if (bFoundFlag == false)              //order wasn't found
+         if (StringSubstr(sOrdNewArr[j], 0, 4) != "from")   //new order
+            {
+            SendMail("Trade Notification Email (TNE)","Order #"+IntegerToString(stcOrdNewArr[j].ticket)+" has been placed on the account "+AccountName()+" "+AccountServer()+
+            "\n"+
+            "\nThe order entry price for this trade is "+DoubleToStr(stcOrdNewArr[j].open,_Digits)+
+            "\n"+
+            "\nThe spread charge for this position is £"+DoubleToStr((MarketInfo(Symbol(),MODE_SPREAD)*MarketInfo(Symbol(),MODE_TICKVALUE))*stcOrdNewArr[j].lot,2)+
+            "\n"+
+            "\nThis is an Automated Message from Blue City Asset Management Limited"+
+            "\n-----------------------------------------------------------------------"+
+            "\n"+
+            "\nPRIVACY NOTICE"+
+            "\nThis email is intended for the recipient stated at the address at the top of this email. If you have received this in error, please delete this email immediately and contact us at globalcompliance@indomtrading.com"+
+            "\n"+
+            "\nInDom Trading Asset Management (Europe) Limited"+
+            "\nHanover Walk"+
+            "\nLondon"+
+            "\nEC3 3UR"+
+            "\nRegistered Company Number 07704540.Registered in England and Wales");
+            SendNotification("Ticket #"+IntegerToString(stcOrdNewArr[j].ticket)+" has been opened");
+            }
+      }
+   }
+   
+  }
+
